@@ -67,10 +67,6 @@ with st.form("config_form"):
     base_url = st.text_input("Base URL", "https://studio.jojonomic.com/", placeholder="e.g., https://studio.jojonomic.com/")
     email = st.text_input("Email", placeholder="user@example.com")
     password = st.text_input("Password", type="password")
-    single_limit = st.number_input("Single Exp. Manager Limit", min_value=1, value=DEFAULT_SINGLE_EXP_MANAGER_LIMIT)
-    multiple_limit = st.number_input("Multiple Exp. Manager Limit", min_value=1, value=DEFAULT_MULTIPLE_EXP_MANAGER_LIMIT)
-    data_limit = st.number_input("Data Manager Limit", min_value=1, value=DEFAULT_DATA_MANAGER_LIMIT)
-    vp_limit = st.number_input("Visual Programming Limit", min_value=1, value=DEFAULT_VISUAL_PROGRAMMING_LIMIT)
     start_date = st.date_input("Start Date", value=None)
     end_date = st.date_input("End Date", value=None)
     submitted = st.form_submit_button("List Components")
@@ -94,19 +90,19 @@ if submitted:
 
         # Fetch components
         with st.spinner("Fetching Single Exp. Manager components..."):
-            single_exp = lister.fetch_single_exp_manager(single_limit)
+            single_exp = lister.fetch_single_exp_manager(DEFAULT_SINGLE_EXP_MANAGER_LIMIT)
             single_exp = filter_by_updated_at(single_exp, start_ts, end_ts)
         st.success(f"Fetched {len(single_exp)} Single Exp. Manager components.")
         with st.spinner("Fetching Multiple Exp. Manager components..."):
-            multiple_exp = lister.fetch_multiple_exp_manager(multiple_limit)
+            multiple_exp = lister.fetch_multiple_exp_manager(DEFAULT_MULTIPLE_EXP_MANAGER_LIMIT)
             multiple_exp = filter_by_updated_at(multiple_exp, start_ts, end_ts)
         st.success(f"Fetched {len(multiple_exp)} Multiple Exp. Manager components.")
         with st.spinner("Fetching Data Manager components..."):
-            data_managers = lister.fetch_all_data_managers(data_limit)
+            data_managers = lister.fetch_all_data_managers(DEFAULT_DATA_MANAGER_LIMIT)
             data_managers = filter_by_updated_at(data_managers, start_ts, end_ts)
         st.success(f"Fetched {len(data_managers)} Data Manager components.")
         with st.spinner("Fetching Visual Programming components..."):
-            vp_exp = lister.fetch_visual_programming(vp_limit)
+            vp_exp = lister.fetch_visual_programming(DEFAULT_VISUAL_PROGRAMMING_LIMIT)
             vp_exp = filter_by_updated_at(vp_exp, start_ts, end_ts)
         st.success(f"Fetched {len(vp_exp)} Visual Programming components.")
         # Prepare CSVs
