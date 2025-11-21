@@ -17,6 +17,20 @@ DEFAULT_MULTIPLE_EXP_MANAGER_LIMIT = int(os.getenv("MULTIPLE_EXP_MANAGER_LIMIT",
 DEFAULT_DATA_MANAGER_LIMIT = int(os.getenv("DATA_MANAGER_LIMIT", 10000))
 DEFAULT_VISUAL_PROGRAMMING_LIMIT = int(os.getenv("VISUAL_PROGRAMMING_LIMIT", 10000))
 
+
+def require_env(name: str) -> str:
+    """Return the value of environment variable `name` or raise a RuntimeError with guidance.
+
+    Endpoints are considered confidential and must be provided via the application's .env file.
+    """
+    val = os.getenv(name)
+    if not val:
+        raise RuntimeError(
+            f"Required environment variable '{name}' is not set.\n"
+            "Please add it to your .env file (do not commit .env to version control)."
+        )
+    return val
+
 # Utility for timestamp conversion
 INDO_TZ = datetime.now().astimezone().tzinfo
 
@@ -60,21 +74,94 @@ def filter_by_updated_at(items, start, end):
     return filtered
 
 class ComponentLister:
-    def __init__(self, base_url, token, company_id):
+    def __init__(self, base_url: str, email: str, password: str):
+        """
+        Initialize ComponentLister by logging in (to obtain a token) and fetching company_id.
+
+        Raises RuntimeError on unrecoverable errors so caller can handle UI feedback.
+        """
         self.base_url = self._prepare_base_url(base_url)
+        self.session = requests.Session()
+
+        # --- Login / obtain token ---
+        login_endpoint = require_env("LOGIN_ENDPOINT")
+        login_url = urljoin(self.base_url, login_endpoint)
+        login_body = {"email": email, "password": password}
+
+        try:
+            resp = self.session.post(login_url, json=login_body, timeout=30)
+            resp.raise_for_status()
+        except requests.RequestException as e:
+            raise RuntimeError(f"Login request failed: {e}") from e
+
+        try:
+            login_json = resp.json()
+        except ValueError as e:
+            raise RuntimeError("Login response is not valid JSON") from e
+
+        # Accept common token locations
+        token = None
+        if isinstance(login_json, dict):
+            token = login_json.get("token")
+            if not token and "data" in login_json and isinstance(login_json["data"], dict):
+                token = login_json["data"].get("token") or login_json["data"].get("access_token")
+            if not token:
+                token = login_json.get("access_token")
+        if not token:
+            raise RuntimeError("Login succeeded but token was not found in the response")
+
+        # Normalize token to include Bearer prefix if missing
+        if not token.lower().startswith("bearer"):
+            token = f"Bearer {token}"
+
+        # Set default headers for subsequent requests
         self.headers = {
             "accept": "application/json, text/plain, */*",
             "authorization": token,
         }
-        self.session = requests.Session()
         self.session.headers.update(self.headers)
+
+        # --- Fetch company_id ---
+        apps_endpoint = require_env("APPLICATION_PAGES_ENDPOINT")
+        apps_url = urljoin(self.base_url, apps_endpoint)
+        apps_params = {"page": 1, "limit": 1, "column": "updated_at", "sort": "desc"}
+
+        try:
+            apps_resp = self.session.get(apps_url, params=apps_params, timeout=30)
+            apps_resp.raise_for_status()
+        except requests.RequestException as e:
+            raise RuntimeError(f"Failed to fetch application pages to determine company_id: {e}") from e
+
+        try:
+            apps_json = apps_resp.json()
+        except ValueError as e:
+            raise RuntimeError("Applications response is not valid JSON") from e
+
+        # Extract company_id from common locations
+        company_id = None
+        if isinstance(apps_json, dict):
+            data = apps_json.get("data") or apps_json.get("items") or apps_json.get("result")
+            if isinstance(data, list) and len(data) > 0:
+                first = data[0]
+                if isinstance(first, dict):
+                    company_id = first.get("company_id") or first.get("companyId") or first.get("company")
+            # Some APIs return company_id at top level
+            if not company_id:
+                company_id = apps_json.get("company_id") or apps_json.get("companyId")
+
+        if not company_id:
+            raise RuntimeError("Unable to determine company_id from applications response")
+
         self.company_id = company_id
+
     def _prepare_base_url(self, url):
         url = url.rstrip("/")
         url = url.replace("studio", "gateway")
         return url + "/"
+
     def _build_filter(self):
         return {"company_id": self.company_id}
+
     def _make_request(self, endpoint, method="GET", params=None, json_data=None):
         url = urljoin(self.base_url, endpoint)
         try:
@@ -85,10 +172,19 @@ class ComponentLister:
             else:
                 raise ValueError(f"Unsupported HTTP method: {method}")
             response.raise_for_status()
-            return response.json()
+            try:
+                return response.json()
+            except ValueError:
+                st.error(f"Invalid JSON response from {endpoint}")
+                return {"data": []}
+        except requests.HTTPError as e:
+            st.error(f"HTTP error fetching {endpoint}: {e} (status {getattr(e.response, 'status_code', 'N/A')})")
+        except requests.RequestException as e:
+            st.error(f"Network error fetching {endpoint}: {e}")
         except Exception as e:
-            st.error(f"Error fetching {endpoint}: {e}")
-            return {"data": []}
+            st.error(f"Unexpected error fetching {endpoint}: {e}")
+        return {"data": []}
+
     def fetch_single_exp_manager(self, limit):
         params = {
             "limit": limit,
@@ -96,13 +192,15 @@ class ComponentLister:
             "sort": json.dumps({"updated_at": -1}),
             "filter": json.dumps(self._build_filter()),
         }
-        resp = self._make_request(os.getenv("SINGLE_EXP_MANAGER_ENDPOINT", "v1/nocode/studio/form/fetch"), "GET", params=params)
+        endpoint = require_env("SINGLE_EXP_MANAGER_ENDPOINT")
+        resp = self._make_request(endpoint, "GET", params=params)
         return resp.get("data", [])
+
     def fetch_multiple_exp_manager(self, limit):
         chunk_size = 10
         pages = limit // chunk_size + (1 if limit % chunk_size != 0 else 0)
         data = []
-        endpoint = os.getenv("MULTIPLE_EXP_MANAGER_ENDPOINT", "v1/nocode/studio/multiple-form-ui/setup/fetch")
+        endpoint = require_env("MULTIPLE_EXP_MANAGER_ENDPOINT")
         for page in range(1, pages + 1):
             params = {
                 "limit": chunk_size,
@@ -113,8 +211,9 @@ class ComponentLister:
             resp = self._make_request(endpoint, "GET", params=params)
             data.extend(resp.get("data", []))
         return data
+
     def fetch_tablegroups(self, limit):
-        endpoint = os.getenv("TABLEGROUP_ENDPOINT", "v1/nocode/data/tablegroup/fetch")
+        endpoint = require_env("TABLEGROUP_ENDPOINT")
         json_data = {
             "limit": limit,
             "page": 1,
@@ -123,14 +222,13 @@ class ComponentLister:
         }
         resp = self._make_request(endpoint, "POST", json_data=json_data)
         return resp.get("data", [])
+
     def fetch_data_manager_by_tablegroup(self, tablegroup_id, limit):
-        endpoint = os.getenv("DATA_MANAGER_ENDPOINT", "v1/nocode/data/fetch-by-table-groupID")
-        json_data = {
-            "tablegroup_id": tablegroup_id,
-            "search": "",
-        }
+        endpoint = require_env("DATA_MANAGER_ENDPOINT")
+        json_data = {"tablegroup_id": tablegroup_id, "search": ""}
         resp = self._make_request(endpoint, "POST", json_data=json_data)
         return resp.get("data", [])
+
     def fetch_all_data_managers(self, limit):
         tablegroups = self.fetch_tablegroups(limit)
         all_data_managers = []
@@ -141,6 +239,7 @@ class ComponentLister:
             data_managers = self.fetch_data_manager_by_tablegroup(tg_id, limit)
             all_data_managers.extend(data_managers)
         return all_data_managers
+
     def fetch_visual_programming(self, limit):
         params = {
             "limit": limit,
@@ -148,7 +247,7 @@ class ComponentLister:
             "sort": json.dumps({"updated_at": -1}),
             "filter": json.dumps(self._build_filter()),
         }
-        endpoint = os.getenv("VISUAL_PROGRAMMING_ENDPOINT", "v1/nocode/studio/automation/fetch")
+        endpoint = require_env("VISUAL_PROGRAMMING_ENDPOINT")
         resp = self._make_request(endpoint, "GET", params=params)
         return resp.get("data", [])
 
@@ -157,8 +256,8 @@ st.title("Component Listing Tool")
 
 with st.form("config_form"):
     base_url = st.text_input("Base URL", "https://studio.jojonomic.com/", placeholder="e.g., https://studio.jojonomic.com/")
-    token = st.text_area("Auth Token", placeholder="Bearer ...")
-    company_id = st.text_input("Company ID", placeholder="e.g., 27134")
+    email = st.text_input("Email", placeholder="user@example.com")
+    password = st.text_input("Password", type="password")
     single_limit = st.number_input("Single Exp. Manager Limit", min_value=1, value=DEFAULT_SINGLE_EXP_MANAGER_LIMIT)
     multiple_limit = st.number_input("Multiple Exp. Manager Limit", min_value=1, value=DEFAULT_MULTIPLE_EXP_MANAGER_LIMIT)
     data_limit = st.number_input("Data Manager Limit", min_value=1, value=DEFAULT_DATA_MANAGER_LIMIT)
@@ -169,11 +268,10 @@ with st.form("config_form"):
 
 if submitted:
     # Validate required fields
-    if not base_url or not token or not company_id:
-        st.error("Base URL, Token, and Company ID are required.")
+    if not base_url or not email or not password:
+        st.error("Base URL, Email, and Password are required.")
     else:
-        safe_token = "".join(token.splitlines()).strip()
-        lister = ComponentLister(base_url.strip(), safe_token, int(str(company_id).strip()))
+        lister = ComponentLister(base_url.strip(), email.strip(), password)
         # Extract & convert date to timestamp
         if start_date is None:
             start_ts = 0
