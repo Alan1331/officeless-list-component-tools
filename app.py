@@ -10,6 +10,7 @@ from typing import Optional, List, Dict, Any
 from urllib.parse import urljoin
 from dotenv import load_dotenv
 from component_lister import ComponentLister
+from dependency_analyst import DependencyAnalyst
 
 # Load default limits from .env
 load_dotenv()
@@ -76,7 +77,12 @@ if submitted:
     if not base_url or not email or not password:
         st.error("Base URL, Email, and Password are required.")
     else:
-        lister = ComponentLister(base_url.strip(), email.strip(), password)
+        try:
+            lister = ComponentLister(base_url.strip(), email.strip(), password)
+        except Exception as e:
+            st.error(f"Failed to initialize ComponentLister: {e}")
+            st.stop()
+
         # Extract & convert date to timestamp
         if start_date is None:
             start_ts = 0
@@ -88,32 +94,75 @@ if submitted:
 
         end_ts = int(datetime.combine(end_date, datetime.max.time()).timestamp())
 
-        # Fetch components
-        with st.spinner("Fetching Single Exp. Manager components..."):
-            single_exp = lister.fetch_single_exp_manager(DEFAULT_SINGLE_EXP_MANAGER_LIMIT)
-            single_exp = filter_by_updated_at(single_exp, start_ts, end_ts)
-        st.success(f"Fetched {len(single_exp)} Single Exp. Manager components.")
-        with st.spinner("Fetching Multiple Exp. Manager components..."):
-            multiple_exp = lister.fetch_multiple_exp_manager(DEFAULT_MULTIPLE_EXP_MANAGER_LIMIT)
-            multiple_exp = filter_by_updated_at(multiple_exp, start_ts, end_ts)
-        st.success(f"Fetched {len(multiple_exp)} Multiple Exp. Manager components.")
-        with st.spinner("Fetching Data Manager components..."):
-            data_managers = lister.fetch_all_data_managers(DEFAULT_DATA_MANAGER_LIMIT)
-            data_managers = filter_by_updated_at(data_managers, start_ts, end_ts)
-        st.success(f"Fetched {len(data_managers)} Data Manager components.")
-        with st.spinner("Fetching Visual Programming components..."):
-            vp_exp = lister.fetch_visual_programming(DEFAULT_VISUAL_PROGRAMMING_LIMIT)
-            vp_exp = filter_by_updated_at(vp_exp, start_ts, end_ts)
-        st.success(f"Fetched {len(vp_exp)} Visual Programming components.")
+        # Prepare full unfiltered data for dependency analysis
+        full_single_exp = []
+        full_multi_exp = []
+        full_dm = []
+        full_vp = []
+
+        # Fetch components (wrapped to show errors cleanly)
+        try:
+            with st.spinner("Fetching Single Exp. Manager components..."):
+                single_exp = lister.fetch_single_exp_manager(DEFAULT_SINGLE_EXP_MANAGER_LIMIT)
+                full_single_exp = single_exp  # keep full data for dependency analysis
+                single_exp = filter_by_updated_at(single_exp, start_ts, end_ts)
+            st.success(f"Fetched {len(single_exp)} Single Exp. Manager components.")
+
+            with st.spinner("Fetching Multiple Exp. Manager components..."):
+                multiple_exp = lister.fetch_multiple_exp_manager(DEFAULT_MULTIPLE_EXP_MANAGER_LIMIT)
+                full_multi_exp = multiple_exp  # keep full data for dependency analysis
+                multiple_exp = filter_by_updated_at(multiple_exp, start_ts, end_ts)
+            st.success(f"Fetched {len(multiple_exp)} Multiple Exp. Manager components.")
+
+            with st.spinner("Fetching Data Manager components..."):
+                data_managers = lister.fetch_all_data_managers(DEFAULT_DATA_MANAGER_LIMIT)
+                full_dm = data_managers  # keep full data for dependency analysis
+                data_managers = filter_by_updated_at(data_managers, start_ts, end_ts)
+            st.success(f"Fetched {len(data_managers)} Data Manager components.")
+
+            with st.spinner("Fetching Visual Programming components..."):
+                vp_exp = lister.fetch_visual_programming(DEFAULT_VISUAL_PROGRAMMING_LIMIT)
+                full_vp = vp_exp  # keep full data for dependency analysis
+                vp_exp = filter_by_updated_at(vp_exp, start_ts, end_ts)
+            st.success(f"Fetched {len(vp_exp)} Visual Programming components.")
+        except Exception as e:
+            st.error(f"Error while fetching components: {e}")
+            st.stop()
+
         # Prepare CSVs
         def to_df(data):
             return pd.DataFrame([{k: convert_timestamp(v) if k in ("created_at", "updated_at") else v for k, v in item.items()} for item in data])[['id','name','created_at','updated_at']] if data else pd.DataFrame(columns=['id','name','created_at','updated_at'])
+        # Enrich VP components with dependency analysis (uses unfiltered full lists as index)
+        try:
+            analyst = DependencyAnalyst(full_dm, full_single_exp, full_multi_exp, full_vp)
+            enriched_vp = analyst.analyze_vp_dependencies(vp_exp)
+        except Exception as e:
+            # If dependency analysis fails, proceed without enrichment but show a warning
+            st.warning(f"Dependency analysis failed: {e}")
+            enriched_vp = vp_exp
+
+        # Prepare CSV files; add Dependencies and Missing Dependencies columns for VPs
+        vp_rows = []
+        for v in enriched_vp:
+            deps = v.get("vp_dependencies") or []
+            missing = v.get("vp_missing_dependencies") or []
+            vp_rows.append({
+                "id": v.get("id"),
+                "name": v.get("name"),
+                "created_at": convert_timestamp(v.get("created_at")),
+                "updated_at": convert_timestamp(v.get("updated_at")),
+                "Dependencies": "\n".join(deps),
+                "Missing Dependencies": "\n".join(missing),
+            })
+
         files = {
             "single-exp-manager-list.csv": to_df(single_exp),
             "multiple-exp-manager-list.csv": to_df(multiple_exp),
             "dm-list.csv": to_df(data_managers),
-            "vp-list.csv": to_df(vp_exp),
+            "vp-list.csv": pd.DataFrame(vp_rows),
+            "missing-dependencies.csv": pd.DataFrame(analyst.get_missing_dependencies()),
         }
+
         # Show download button for ZIP
         zip_buffer = io.BytesIO()
         with zipfile.ZipFile(zip_buffer, "w") as zf:

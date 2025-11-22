@@ -118,18 +118,15 @@ class ComponentLister:
             else:
                 raise ValueError(f"Unsupported HTTP method: {method}")
             response.raise_for_status()
-            try:
-                return response.json()
-            except ValueError:
-                st.error(f"Invalid JSON response from {endpoint}")
-                return {"data": []}
         except requests.HTTPError as e:
-            st.error(f"HTTP error fetching {endpoint}: {e} (status {getattr(e.response, 'status_code', 'N/A')})")
+            # Raise errors to be handled by the UI layer
+            raise RuntimeError(f"HTTP error fetching {endpoint}: {e} (status {getattr(e.response, 'status_code', 'N/A')})") from e
         except requests.RequestException as e:
-            st.error(f"Network error fetching {endpoint}: {e}")
-        except Exception as e:
-            st.error(f"Unexpected error fetching {endpoint}: {e}")
-        return {"data": []}
+            raise RuntimeError(f"Network error fetching {endpoint}: {e}") from e
+        try:
+            return response.json()
+        except ValueError as e:
+            raise RuntimeError(f"Invalid JSON response from {endpoint}") from e
 
     def fetch_single_exp_manager(self, limit):
         params = {
